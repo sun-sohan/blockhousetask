@@ -6,13 +6,21 @@ import matplotlib.pyplot as plt
 from functools import reduce
 
 # Notes
-# Useless Columns: rtype, publisher_id, symbol
+# Irrelevant Columns: rtype, publisher_id, symbol
 # prioritize ts_event, because we want to account for the latency of getting the event
 # As publisher_id exists, I'm assuming that the data is already cleaned
 
 file_path = 'first_25000_rows.csv'
 data = pd.read_csv(file_path)
-print(data['depth'].max())
+
+# Makes canceled order sizes negative, it makes the OFI calculations easier by accounting for order cancellations.
+# We also remove the Trade action type, as we only want to focus on the buying and selling of orders as according
+# to the paper.
+for level in range(0, 10):  # Assuming max_depth is 9
+    level_str = f"{level:02}"
+    data.loc[data['action'] == 'C', f'ask_sz_{level_str}'] *= -1
+    data.loc[data['action'] == 'C', f'bid_sz_{level_str}'] *= -1
+    data = data[data['action'] != 'T']
 
 class OFI_Creation:
     def __init__(self, data, max_depth):
@@ -277,7 +285,6 @@ class OFI_Creation:
             raise
 
 proc_data = OFI_Creation(data, 9)
-print(proc_data.data.head())
 ofi_best_level = proc_data.compute_best_level()
 ofi_best_level.to_csv('feature_outputs/ofi_best_level.csv', index=False)
 ofi_multi_level = proc_data.compute_multi_level_ofi(interval='30s')
