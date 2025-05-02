@@ -2,6 +2,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 # Notes
 # Useless Columns: rtype, publisher_id, symbol
@@ -170,30 +171,60 @@ class OFI_Creation:
             raise 
     
     def compute_integrated_ofi(self, multi_level_ofi):
+        """
+        Computes the integrated Order Flow Imbalance (OFI) using Principal Component Analysis (PCA).
+        Parameters:
+            multi_level_ofi (pd.DataFrame): A DataFrame produced from the compute_multi_level_ofi function.
+        Returns:
+            pd.DataFrame: DataFrame with two columns: 'ts_event' (timestamp) and 'integrated_ofi' (integrated OFI features).
+        """
+
         try:
             print("Computing integrated OFI...")
-            # Exclude the first column (ts_event) for PCA analysis
-            data_for_pca = multi_level_ofi.iloc[:, 1:]
+            features = multi_level_ofi[[col for col in multi_level_ofi.columns if col.startswith('ofi_') and col != 'ts_event']]
 
-            # Perform PCA
-            pca = PCA(n_components=1)
-            pca.fit(data_for_pca)
-            pc1 = pca.components_[0]
+            # Perform PCA on the features
+            pca = PCA()
+            pca_values = pca.fit_transform(features)
+            pc1 = pca.components_[0]  # First principal component
 
-            # Normalize using L1 norm
+            # Normalize so all weights sum to 1 (2.1.3 from the paper)
             weights = pc1 / np.sum(np.abs(pc1))
 
-            # Project OFI values onto the PC1 direction
-            integrated_ofi = data_for_pca @ weights
+            # Create a DataFrame for the weights
+            weights_df = pd.DataFrame({
+                'Level': [f"Level {i:02}" for i in range(len(weights))],
+                'Weight': weights
+            })
+            print("First PCA Weights for each OFI level:")
+            print(weights_df)
 
-            # Combine integrated OFI with timestamps
+            # Extract the OFI values for each level
+            ofi_matrix = features.values
+
+            # Compute the integrated OFI as the dot product of weights and OFI levels
+            integrated_ofi = np.dot(ofi_matrix, weights)
+
+            # Create a DataFrame with ts_event and integrated OFI
             result = pd.DataFrame({
                 'ts_event': multi_level_ofi['ts_event'].values,
                 'integrated_ofi': integrated_ofi
             })
 
+            # Note for later: might want rolling window PCA to get different weights for different changing market conditions
+            
+            # # Explained variance ratio, just for me to see how much variance is explained by each component
+            # # It's not used at all in the final output, but it's helpful to understand the PCA components
+            
+            # explained_variance_ratio = pca.explained_variance_ratio_
+            # print("Explained Variance Ratio to each component:")
+            # print(explained_variance_ratio)
+
+            # # It appears that the first PCA component explains all the variance.  However, it might be useful
+            # to do some supervised learning to tune these--I just think its peculiar and needs more investigating.
+
             print("Successful.")
-            return integrated_ofi
+            return result
         except Exception as e:
             print(f"An error occurred while computing integrated OFI: {e}")
             raise
@@ -204,5 +235,8 @@ ofi_best_level = proc_data.compute_best_level()
 ofi_best_level.to_csv('feature_outputs/ofi_best_level.csv', index=False)
 ofi_multi_level = proc_data.compute_multi_level_ofi(interval='30s')
 ofi_multi_level.to_csv('feature_outputs/ofi_multi_level.csv', index=False)
+
+# !!! the interval of the integrated OFI is the same as the multi level OFI that is inputted
 ofi_integrated = proc_data.compute_integrated_ofi(ofi_multi_level)
 ofi_integrated.to_csv('feature_outputs/ofi_integrated.csv', index=False)
+
