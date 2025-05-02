@@ -3,6 +3,7 @@ from sklearn.decomposition import PCA
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from functools import reduce
 
 # Notes
 # Useless Columns: rtype, publisher_id, symbol
@@ -16,23 +17,24 @@ print(data['depth'].max())
 class OFI_Creation:
     def __init__(self, data, max_depth):
         """
-        Initializes the OFI creation class.
+        Initializes the OFI_Creation class.
         Args:
-            data (pd.DataFrame): The input Limit-Order Book DataFrame..
-            max_depth (int): The maximum Level (M) in the LOB Data.
+            data (pd.DataFrame): The input Limit-Order Book.
+            max_depth (int): The maximum Level (M) in the LOB data.
         """
 
-        self.data = data.sort_values(by='ts_event')
+        self.data = data.sort_values(by='ts_event') # just in case, sort the data by timestamp
         self.max_depth = max_depth
         self.prepare_lob_features()
 
     def prepare_lob_features(self):
         """
-        Shifts bid/asks back by one to be able to calculate OFIs later.
+        Shifts bid/asks back by one to be able to calculate the price changes and resulting quantity imbalance values later
         """
-        # Convert ts_event column to datetime
+        # converting ts_event to datetime
         self.data['ts_event'] = pd.to_datetime(self.data['ts_event'].str[:-1], format='%Y-%m-%dT%H:%M:%S.%f')
-        # preparing LOB data
+        
+        # shifting LOB data
         for level in range(0, self.max_depth + 1):
             level_str = f"{level:02}"  # two-digit level string
             self.data[f'bid_px_{level_str}_shifted'] = self.data[f'bid_px_{level_str}'].shift(1)
@@ -49,6 +51,7 @@ class OFI_Creation:
         Returns:
             pd.DataFrame: DataFrame with OFI values for the level at each ts_event timestamp.
         """
+        # reinstantiating lob values
         level_str = f"{level:02}"
         bid_px = self.data[f'bid_px_{level_str}']
         bid_px_shifted = self.data[f'bid_px_{level_str}_shifted']
@@ -59,36 +62,39 @@ class OFI_Creation:
         ask_qty = self.data[f'ask_sz_{level_str}']
         ask_qty_shifted = self.data[f'ask_sz_{level_str}'].shift(1)
 
-        # Initialize an empty DataFrame for the output
+        # empty dataframe with ts_event
         ofi_data = pd.DataFrame()
         ofi_data['ts_event'] = self.data['ts_event']
 
-        # Calculate bid OFI
+        # bid OFI
         ofi_data['bid_ofi'] = 0
         ofi_data.loc[bid_px > bid_px_shifted, 'bid_ofi'] = bid_qty
         ofi_data.loc[bid_px == bid_px_shifted, 'bid_ofi'] = bid_qty - bid_qty_shifted
         ofi_data.loc[bid_px < bid_px_shifted, 'bid_ofi'] = -bid_qty
 
-        # Calculate ask OFI
+        # ask OFI
         ofi_data['ask_ofi'] = 0
         ofi_data.loc[ask_px > ask_px_shifted, 'ask_ofi'] = ask_qty
         ofi_data.loc[ask_px == ask_px_shifted, 'ask_ofi'] = ask_qty - ask_qty_shifted
         ofi_data.loc[ask_px < ask_px_shifted, 'ask_ofi'] = -ask_qty
 
-        # Calculate the total OFI
+        # in all of the features, they are aggregated by the difference of the bid and ask OFIs, so I do it here to make future functions easier
         ofi_data[f'ofi_{level:02}'] = ofi_data['bid_ofi'] - ofi_data['ask_ofi']
 
         if multi_level == True:
-            # Calculate the Average Order Book Depth (2.1.2) across the OFI level
+            # calculate the Average Order Book Depth (2.1.2) across the OFI level
             ofi_data[f'avg_mult_ofi_{level:02}'] = (ofi_data['bid_ofi'] + ofi_data['ask_ofi']) / 2 / (self.max_depth + 1)
 
         ofi_data.drop(columns=['bid_ofi', 'ask_ofi'], inplace=True)
 
+        # accounting for the user desiring a particular time interval
         if interval is not None and multi_level == True:
-            # Resample the data to the given interval
+            # resample the data to the given interval
             ofi_data.set_index('ts_event', inplace=True)
             ofi_data = ofi_data.resample(interval).sum()
-            ofi_data['row_count'] = ofi_data.index.to_series().map(
+            
+            # Collects the row count for each resampled interval, which is used to normalize the OFI values later when computing features, if needed
+            ofi_data['row_count'] = ofi_data.index.to_series().map( # I will admit, I certainly used Copilot for this map function due to time constraints on the project.
                 lambda x: self.data[(self.data['ts_event'] >= x) & 
                                     (self.data['ts_event'] < x + pd.Timedelta(interval))].shape[0]
             )
@@ -96,6 +102,7 @@ class OFI_Creation:
             ofi_data.drop(columns=['row_count'], inplace=True)
             ofi_data.reset_index(inplace=True)
 
+        # in the event there is no interval
         elif interval is not None:
             # Resample the data to the given interval
             ofi_data.set_index('ts_event', inplace=True)
@@ -116,6 +123,7 @@ class OFI_Creation:
         try:
             print("Computing best level OFI...")
             result = self.create_ofi(0, interval=interval)
+            result.rename(columns={f'ofi_{0:02}': 'best_level_ofi'}, inplace=True) # just renaming the column for clarity
             print("Successful.")
             return result
         except Exception as e:
@@ -229,6 +237,45 @@ class OFI_Creation:
             print(f"An error occurred while computing integrated OFI: {e}")
             raise
 
+    def create_cross_asset_ofi_feature(ofi_feature_df_dict, target_asset, feature_type='integrated_ofi'):
+        """
+        Creates the Cross-Asset OFI feature for a given target asset.
+
+        Parameters:
+            ofi_feature_df_dict (dict): Dictionary {asset_name: best_level_ofi or integrated_ofi as ['ts_event', ofi_DataFrame]}.
+            target_asset (str): the target asset.
+            feature_type (str): Column name to extract from each DataFrame (options: 'integrated_ofi', 'best_level_ofi').
+
+        Returns:
+            pd.DataFrame: DataFrame with ['ts_event', 'cross_asset_ofi'] for the target asset.
+        """
+        try:
+            print("Computing integrated OFI...")
+
+            # extract the target asset's OFIs
+            target_df = ofi_feature_df_dict[target_asset][['ts_event', feature_type]].copy()
+            target_df.rename(columns={feature_type: f'ofi_{target_asset}_target'}, inplace=True)
+
+            # list to hold the other assets OFIs
+            other_assets_dfs = []
+
+            # process each other asset in the dictionary
+            for asset, df in ofi_feature_df_dict.items():
+                if asset != target_asset:
+                    temp_df = df[['ts_event', feature_type]].copy()
+                    temp_df.rename(columns={feature_type: f'ofi_{asset}'}, inplace=True)
+                    other_assets_dfs.append(temp_df)
+
+            # merge the asset OFI columns to match timestamps
+            merged_df = reduce(lambda left, right: pd.merge(left, right, on='ts_event', how='inner'), [target_df] + other_assets_dfs)
+
+            print("Successful.")
+
+            return merged_df
+        except Exception as e:
+            print(f"An error occurred while computing cross-asset OFI: {e}")
+            raise
+
 proc_data = OFI_Creation(data, 9)
 print(proc_data.data.head())
 ofi_best_level = proc_data.compute_best_level()
@@ -240,3 +287,9 @@ ofi_multi_level.to_csv('feature_outputs/ofi_multi_level.csv', index=False)
 ofi_integrated = proc_data.compute_integrated_ofi(ofi_multi_level)
 ofi_integrated.to_csv('feature_outputs/ofi_integrated.csv', index=False)
 
+ofi_feature_df_dict = {
+    'AAPL': ofi_integrated,
+    'MSFT': ofi_integrated,
+}
+cross_asset_ofi = OFI_Creation.create_cross_asset_ofi_feature(ofi_feature_df_dict, 'AAPL', feature_type='integrated_ofi')
+cross_asset_ofi.to_csv('feature_outputs/ofi_cross_asset.csv', index=False)
