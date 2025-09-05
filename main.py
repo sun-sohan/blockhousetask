@@ -258,7 +258,7 @@ class OFI_Creation:
             pd.DataFrame: DataFrame with ['ts_event', 'cross_asset_ofi'] for the target asset.
         """
         try:
-            print("Computing integrated OFI...")
+            print("Computing cross-asset OFI...")
 
             # extract the target asset's OFIs
             target_df = ofi_feature_df_dict[target_asset][['ts_event', feature_type]].copy()
