@@ -287,7 +287,7 @@ class OFI_Creation:
 proc_data = OFI_Creation(data, 9)
 ofi_best_level = proc_data.compute_best_level()
 ofi_best_level.to_csv('feature_outputs/ofi_best_level.csv', index=False)
-ofi_multi_level = proc_data.compute_multi_level_ofi(interval='30s')
+ofi_multi_level = proc_data.compute_multi_level_ofi(interval='5s')
 ofi_multi_level.to_csv('feature_outputs/ofi_multi_level.csv', index=False)
 
 # !!! the interval of the integrated OFI is the same as the multi level OFI that is inputted
